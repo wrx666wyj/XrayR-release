@@ -1,0 +1,74 @@
+name: Sync Upstream Releases
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install GitHub CLI
+        run: |
+          type -p gh >/dev/null || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt update && sudo apt install gh -y)
+
+      - name: Get upstream latest release tag
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release list --repo perfect-panel/XrayR-release --limit 1 --json tagName --jq '.[0].tagName')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Get target latest release tag
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
+          echo "tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+
+      - name: Check if update needed
+        id: check
+        run: |
+          if [[ -z "${{ steps.target.outputs.tag }}" || "${{ steps.upstream.outputs.tag }}" != "${{ steps.target.outputs.tag }}" ]]; then
+            echo "need_update=true" >> $GITHUB_OUTPUT
+          else
+            echo "need_update=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download upstream assets
+        if: steps.check.outputs.need_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p upstream_assets
+          cd upstream_assets
+          gh release download ${{ steps.upstream.outputs.tag }} \
+            --repo perfect-panel/XrayR-release \
+            --clobber \
+            --dir .
+
+      - name: Modify .sh files to point to your repo
+        if: steps.check.outputs.need_update == 'true'
+        run: |
+          find upstream_assets -type f -name "*.sh" | while read file; do
+            sed -i 's/perfect-panel/wrx666wyj/g' "$file"
+          done
+
+      - name: Create release and upload assets
+        if: steps.check.outputs.need_update == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.upstream.outputs.tag }}
+          name: ${{ steps.upstream.outputs.tag }}
+          files: upstream_assets/*
+          generate_release_notes: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: wrx666wyj/XrayR-release
