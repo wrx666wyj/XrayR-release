@@ -103,30 +103,42 @@ install_acme() {
 get_latest_version() {
     local token=${GITHUB_TOKEN:-}
     local api_url="https://api.github.com/repos/wrx666wyj/XrayR-release/releases/latest"
-    
-    # 优先尝试使用 token 认证
+    local auth_header=""
+
+    # 如果环境变量中有 GITHUB_TOKEN，就构造认证头
     if [[ -n "$token" ]]; then
-        version=$(curl -s -H "Authorization: token $token" "$api_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        auth_header="-H \"Authorization: token $token\""
+        echo -e "${yellow}使用 GITHUB_TOKEN 进行认证请求...${plain}" >&2
+    else
+        echo -e "${yellow}未找到 GITHUB_TOKEN，将使用未认证请求（可能受速率限制）${plain}" >&2
+    fi
+
+    # 1. 优先尝试使用 token 认证（如果提供）
+    if [[ -n "$token" ]]; then
+        # 使用 eval 来处理包含空格的命令，注意安全
+        version=$(eval curl -s $auth_header "$api_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ -n "$version" ]]; then
             echo "$version"
             return 0
         fi
+        echo -e "${yellow}Token 认证请求失败，尝试无认证请求...${plain}" >&2
     fi
-    
-    # 如果没有 token 或 token 请求失败，尝试无认证请求
+
+    # 2. 如果没有 token 或 token 请求失败，尝试无认证请求
     version=$(curl -s "$api_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [[ -n "$version" ]]; then
         echo "$version"
         return 0
     fi
-    
-    # 最后回退：从仓库中的 latest_version.txt 读取
+
+    # 3. 最后回退：从仓库中的 latest_version.txt 读取
+    echo -e "${yellow}API 请求失败，尝试从 latest_version.txt 读取版本...${plain}" >&2
     version=$(curl -s "https://raw.githubusercontent.com/wrx666wyj/XrayR-release/master/latest_version.txt")
     if [[ -n "$version" ]]; then
         echo "$version"
         return 0
     fi
-    
+
     return 1
 }
 
