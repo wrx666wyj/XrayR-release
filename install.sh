@@ -51,7 +51,6 @@ fi
 
 os_version=""
 
-# os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
 fi
@@ -83,7 +82,6 @@ install_base() {
     fi
 }
 
-# 0: running, 1: not running, 2: not installed
 check_status() {
     if [[ ! -f /etc/systemd/system/XrayR.service ]]; then
         return 2
@@ -96,49 +94,20 @@ check_status() {
     fi
 }
 
-install_acme() {
-    curl https://get.acme.sh | sh
-}
-
+# 获取最新版本号：通过 GitHub 重定向（无 API 限制）
 get_latest_version() {
-    local token=${GITHUB_TOKEN:-}
-    local api_url="https://api.github.com/repos/wrx666wyj/XrayR-release/releases/latest"
-    local auth_header=""
-
-    # 如果环境变量中有 GITHUB_TOKEN，就构造认证头
-    if [[ -n "$token" ]]; then
-        auth_header="-H \"Authorization: token $token\""
-        echo -e "${yellow}使用 GITHUB_TOKEN 进行认证请求...${plain}" >&2
-    else
-        echo -e "${yellow}未找到 GITHUB_TOKEN，将使用未认证请求（可能受速率限制）${plain}" >&2
-    fi
-
-    # 1. 优先尝试使用 token 认证（如果提供）
-    if [[ -n "$token" ]]; then
-        # 使用 eval 来处理包含空格的命令，注意安全
-        version=$(eval curl -s $auth_header "$api_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ -n "$version" ]]; then
-            echo "$version"
-            return 0
-        fi
-        echo -e "${yellow}Token 认证请求失败，尝试无认证请求...${plain}" >&2
-    fi
-
-    # 2. 如果没有 token 或 token 请求失败，尝试无认证请求
-    version=$(curl -s "$api_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ -n "$version" ]]; then
-        echo "$version"
+    local url="https://github.com/wrx666wyj/XrayR-release/releases/latest"
+    local tag=$(curl -Ls -o /dev/null -w '%{url_effective}' "$url" | grep -o 'v[0-9.]*')
+    if [[ -n "$tag" ]]; then
+        echo "$tag"
         return 0
     fi
-
-    # 3. 最后回退：从仓库中的 latest_version.txt 读取
-    echo -e "${yellow}API 请求失败，尝试从 latest_version.txt 读取版本...${plain}" >&2
-    version=$(curl -s "https://raw.githubusercontent.com/wrx666wyj/XrayR-release/master/latest_version.txt")
-    if [[ -n "$version" ]]; then
-        echo "$version"
+    # 回退：从仓库中的 latest_version.txt 读取
+    local fallback=$(curl -s "https://raw.githubusercontent.com/wrx666wyj/XrayR-release/master/latest_version.txt")
+    if [[ -n "$fallback" ]]; then
+        echo "$fallback"
         return 0
     fi
-
     return 1
 }
 
@@ -147,17 +116,18 @@ install_XrayR() {
         rm /usr/local/XrayR/ -rf
     fi
 
-    mkdir /usr/local/XrayR/ -p
+    mkdir -p /usr/local/XrayR /etc/XrayR /var/log/XrayR
     cd /usr/local/XrayR/
 
-    if  [ $# == 0 ] ;then
+    if [ $# == 0 ]; then
         last_version=$(get_latest_version)
         if [[ -z "$last_version" ]]; then
             echo -e "${red}检测 XrayR 版本失败，请稍后再试，或手动指定 XrayR 版本安装${plain}"
             exit 1
         fi
         echo -e "检测到 XrayR 最新版本：${last_version}，开始安装"
-        wget -q -N --no-check-certificate -O /usr/local/XrayR/XrayR-linux.zip https://github.com/wrx666wyj/XrayR-release/releases/download/${last_version}/XrayR-linux-${arch}.zip
+        download_url="https://github.com/wrx666wyj/XrayR-release/releases/download/${last_version}/XrayR-linux-${arch}.zip"
+        wget -q --show-progress -O XrayR-linux.zip "$download_url"
         if [[ $? -ne 0 ]]; then
             echo -e "${red}下载 XrayR 失败，请确保你的服务器能够下载 Github 的文件${plain}"
             exit 1
@@ -166,88 +136,84 @@ install_XrayR() {
         if [[ $1 == v* ]]; then
             last_version=$1
         else
-            last_version="v"$1
+            last_version="v$1"
         fi
-        url="https://github.com/wrx666wyj/XrayR-release/releases/download/${last_version}/XrayR-linux-${arch}.zip"
+        download_url="https://github.com/wrx666wyj/XrayR-release/releases/download/${last_version}/XrayR-linux-${arch}.zip"
         echo -e "开始安装 XrayR ${last_version}"
-        wget -q -N --no-check-certificate -O /usr/local/XrayR/XrayR-linux.zip ${url}
+        wget -q --show-progress -O XrayR-linux.zip "$download_url"
         if [[ $? -ne 0 ]]; then
             echo -e "${red}下载 XrayR ${last_version} 失败，请确保此版本存在${plain}"
             exit 1
         fi
     fi
 
-    unzip XrayR-linux.zip
-    rm XrayR-linux.zip -f
+    unzip -o XrayR-linux.zip
+    rm -f XrayR-linux.zip
     chmod +x XrayR
-    mkdir /etc/XrayR/ -p
-    rm /etc/systemd/system/XrayR.service -f
-    file="https://github.com/wrx666wyj/XrayR-release/raw/master/XrayR.service"
-    wget -q -N --no-check-certificate -O /etc/systemd/system/XrayR.service ${file}
+
+    # 复制配置文件和数据文件
+    cp -f config.yml geoip.dat geosite.dat dns.json route.json custom_outbound.json custom_inbound.json rulelist /etc/XrayR/ 2>/dev/null
+
+    # 下载或创建 systemd service 文件
+    service_file="https://raw.githubusercontent.com/wrx666wyj/XrayR-release/master/XrayR.service"
+    if ! wget -q -O /etc/systemd/system/XrayR.service "$service_file"; then
+        # 如果下载失败，手动创建
+        cat > /etc/systemd/system/XrayR.service <<EOF
+[Unit]
+Description=XrayR Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/XrayR/XrayR
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
     systemctl daemon-reload
     systemctl stop XrayR
     systemctl enable XrayR
-    echo -e "${green}XrayR ${last_version}${plain} 安装完成，已设置开机自启"
-    cp geoip.dat /etc/XrayR/
-    cp geosite.dat /etc/XrayR/
+
+    echo -e "${green}XrayR ${last_version} 安装完成，已设置开机自启${plain}"
 
     if [[ ! -f /etc/XrayR/config.yml ]]; then
-        cp config.yml /etc/XrayR/
         echo -e ""
-        echo -e "全新安装，请先参看教程：https://github.com/wrx666wyj/XrayR-release，配置必要的内容"
+        echo -e "全新安装，请先编辑 /etc/XrayR/config.yml 配置必要的内容"
+        echo -e "配置文件示例: https://github.com/wrx666wyj/XrayR-release/blob/master/config.yml"
     else
         systemctl start XrayR
         sleep 2
         check_status
-        echo -e ""
         if [[ $? == 0 ]]; then
-            echo -e "${green}XrayR 重启成功${plain}"
+            echo -e "${green}XrayR 启动成功${plain}"
         else
-            echo -e "${red}XrayR 可能启动失败，请稍后使用 XrayR log 查看日志信息，若无法启动，则可能更改了配置格式，请前往 wiki 查看：https://github.com/wrx666wyj/XrayR-release/wiki${plain}"
+            echo -e "${red}XrayR 可能启动失败，请使用 'systemctl status XrayR' 查看日志${plain}"
         fi
     fi
 
-    if [[ ! -f /etc/XrayR/dns.json ]]; then
-        cp dns.json /etc/XrayR/
-    fi
-    if [[ ! -f /etc/XrayR/route.json ]]; then
-        cp route.json /etc/XrayR/
-    fi
-    if [[ ! -f /etc/XrayR/custom_outbound.json ]]; then
-        cp custom_outbound.json /etc/XrayR/
-    fi
-    if [[ ! -f /etc/XrayR/custom_inbound.json ]]; then
-        cp custom_inbound.json /etc/XrayR/
-    fi
-    if [[ ! -f /etc/XrayR/rulelist ]]; then
-        cp rulelist /etc/XrayR/
-    fi
+    # 安装管理脚本
     curl -o /usr/bin/XrayR -Ls https://raw.githubusercontent.com/wrx666wyj/XrayR-release/master/XrayR.sh
     chmod +x /usr/bin/XrayR
-    ln -s /usr/bin/XrayR /usr/bin/xrayr
-    chmod +x /usr/bin/xrayr
+    ln -sf /usr/bin/XrayR /usr/bin/xrayr
+
     cd $cur_dir
-    rm -f install.sh
     echo -e ""
-    echo "XrayR 管理脚本使用方法 (兼容使用xrayr执行，大小写不敏感): "
+    echo "XrayR 管理脚本使用方法:"
     echo "------------------------------------------"
-    echo "XrayR                    - 显示管理菜单 (功能更多)"
-    echo "XrayR start              - 启动 XrayR"
-    echo "XrayR stop               - 停止 XrayR"
-    echo "XrayR restart            - 重启 XrayR"
-    echo "XrayR status             - 查看 XrayR 状态"
-    echo "XrayR enable             - 设置 XrayR 开机自启"
-    echo "XrayR disable            - 取消 XrayR 开机自启"
-    echo "XrayR log                - 查看 XrayR 日志"
-    echo "XrayR update             - 更新 XrayR"
-    echo "XrayR update x.x.x       - 更新 XrayR 指定版本"
-    echo "XrayR config             - 显示配置文件内容"
-    echo "XrayR install            - 安装 XrayR"
-    echo "XrayR uninstall          - 卸载 XrayR"
-    echo "XrayR version            - 查看 XrayR 版本"
+    echo "XrayR start        - 启动 XrayR"
+    echo "XrayR stop         - 停止 XrayR"
+    echo "XrayR restart      - 重启 XrayR"
+    echo "XrayR status       - 查看 XrayR 状态"
+    echo "XrayR log          - 查看 XrayR 日志"
+    echo "XrayR update       - 更新 XrayR"
     echo "------------------------------------------"
 }
 
-echo -e "${green}开始安装${plain}"
+echo -e "${green}开始安装 XrayR...${plain}"
 install_base
 install_XrayR $1
