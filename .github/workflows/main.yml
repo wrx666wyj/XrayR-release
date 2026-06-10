@@ -1,70 +1,100 @@
-name: Sync Upstream Releases
+name: Full Sync (Code + Binaries)
 
 on:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:          # 手动触发
   schedule:
-    - cron: '0 */6 * * *' # 每6小时检查一次
+    - cron: '0 */12 * * *'    # 每12小时自动运行
+
+permissions:
+  contents: write             # 允许创建 Release 和上传文件
 
 jobs:
-  sync-releases:
+  sync-code:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout target repo
+      - name: Checkout your fork
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      - name: Set up GitHub CLI
+      - name: Add upstream code remote
+        run: git remote add upstream-code https://github.com/perfect-panel/XrayR-release.git
+
+      - name: Fetch upstream code (master)
+        run: git fetch upstream-code master
+
+      - name: Check if code has new commits
+        id: code_changed
+        run: |
+          if git diff --quiet HEAD upstream-code/master; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge upstream code and replace links
+        if: steps.code_changed.outputs.changed == 'true'
+        run: |
+          git merge upstream-code/master --no-edit --allow-unrelated-histories || true
+          # 替换所有 .sh 文件中的 perfect-panel 为 wrx666wyj
+          find . -type f -name "*.sh" -exec sed -i 's/perfect-panel/wrx666wyj/g' {} +
+          # 替换 install.sh 中下载二进制的 URL 为你的 Release 地址
+          sed -i 's|https://github.com/perfect-panel/XrayR/releases/download|https://github.com/wrx666wyj/XrayR-release/releases/download|g' install.sh
+          # 替换获取最新版本的 API 地址（如果脚本中有）
+          sed -i 's|https://api.github.com/repos/perfect-panel/XrayR/releases/latest|https://api.github.com/repos/wrx666wyj/XrayR-release/releases/latest|g' install.sh
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Sync upstream code and replace links" || echo "No changes to commit"
+          git push origin master
+
+  sync-binaries:
+    runs-on: ubuntu-latest
+    needs: sync-code   # 先同步代码，再同步二进制（顺序无所谓，可并行）
+    steps:
+      - name: Install GitHub CLI
         run: |
           type -p gh >/dev/null || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt update && sudo apt install gh -y)
 
-      - name: Get latest upstream release
-        id: get_upstream_release
+      - name: Get list of upstream releases (binary repo)
+        id: upstream_releases
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST_RELEASE=$(gh release list --repo perfect-panel/XrayR-release --limit 1 --json tagName --jq '.[0].tagName')
-          echo "tag_name=$LATEST_RELEASE" >> $GITHUB_OUTPUT
+          # 获取 perfect-panel/XrayR 的所有 release tags
+          TAGS=$(gh release list --repo perfect-panel/XrayR --limit 100 --json tagName --jq '.[].tagName')
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-          CURRENT_RELEASE=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
-          echo "current_tag=$CURRENT_RELEASE" >> $GITHUB_OUTPUT
-
-      - name: Check if new release exists
-        id: check_release
-        run: |
-          if [[ -z "${{ steps.get_upstream_release.outputs.current_tag }}" || "${{ steps.get_upstream_release.outputs.tag_name }}" != "${{ steps.get_upstream_release.outputs.current_tag }}" ]]; then
-            echo "status=update_needed" >> $GITHUB_OUTPUT
-          else
-            echo "status=no_update" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Download upstream release assets
-        if: steps.check_release.outputs.status == 'update_needed'
+      - name: Get list of your existing releases
+        id: my_releases
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p upstream_assets
-          cd upstream_assets
-          gh release download ${{ steps.get_upstream_release.outputs.tag_name }} \
-            --repo perfect-panel/XrayR-release \
-            --clobber \
-            --dir .
+          MY_TAGS=$(gh release list --repo wrx666wyj/XrayR-release --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null || echo "")
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "$MY_TAGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Modify .sh files to point to your own repo
-        if: steps.check_release.outputs.status == 'update_needed'
+      - name: Sync missing releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          find upstream_assets -type f -name "*.sh" | while read file; do
-            sed -i 's/perfect-panel/wrx666wyj/g' "$file"
+          UPSTREAM_TAGS="${{ steps.upstream_releases.outputs.tags }}"
+          MY_TAGS="${{ steps.my_releases.outputs.tags }}"
+          for tag in $UPSTREAM_TAGS; do
+            if ! echo "$MY_TAGS" | grep -qx "$tag"; then
+              echo "Syncing release $tag"
+              mkdir -p /tmp/assets/$tag
+              cd /tmp/assets/$tag
+              # 下载上游该 release 的所有 assets
+              gh release download "$tag" --repo perfect-panel/XrayR --clobber --dir .
+              # 可选：过滤只保留你需要的架构（如 linux-amd64），可以自行调整
+              # 然后创建 release 并上传
+              gh release create "$tag" --repo wrx666wyj/XrayR-release --title "$tag" --notes "Synced from perfect-panel/XrayR" ./*
+            else
+              echo "Release $tag already exists, skipping"
+            fi
           done
-
-      - name: Create release and upload assets
-        if: steps.check_release.outputs.status == 'update_needed'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.get_upstream_release.outputs.tag_name }}
-          name: ${{ steps.get_upstream_release.outputs.tag_name }}
-          files: |
-            upstream_assets/*
-          generate_release_notes: false
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repo: wrx666wyj/XrayR-release
